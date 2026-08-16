@@ -106,9 +106,21 @@ def setup_hf_token():
         print(">> HF_TOKEN set from uploaded credential.")
 
 
-def count_batch_tasks():
+def count_batch_chars():
+    """Total characters across all batch tasks' "text" field.
+
+    Synthesis time scales with text length, not task count -- a few long
+    lines can cost far more than many short ones. Used to size batch_timeout
+    below instead of a task-count-based estimate.
+    """
+    import json
+    total = 0
     with open(BATCH_FILE, encoding="utf-8") as f:
-        return sum(1 for line in f if line.strip())
+        for line in f:
+            line = line.strip()
+            if line:
+                total += len(json.loads(line).get("text", ""))
+    return total
 
 
 def main():
@@ -122,13 +134,21 @@ def main():
              "https://github.com/index-tts/index-tts.git", str(REPO)], timeout=180)
 
     run(["uv", "sync"], cwd=str(REPO), timeout=600)
+    # Per-attempt timeout kept short (rather than one long 1200s attempt) so a
+    # stalled download is detected and retried sooner -- see the 2026-08-16
+    # incident where an unauthenticated download sat silent for 28 minutes.
     run(["uv", "run", "indextts2", "download", "--model-dir", str(MODEL_DIR)],
-        cwd=str(REPO), timeout=1200, retries=2, retry_backoff=30)
+        cwd=str(REPO), timeout=600, retries=2, retry_backoff=30)
     run(["uv", "run", "indextts2", "check", "--model-dir", str(MODEL_DIR),
          "--device", "cuda"], cwd=str(REPO), timeout=90)
 
-    num_tasks = count_batch_tasks()
-    batch_timeout = 120 + 90 * num_tasks
+    # Regressed from two real runs (36 chars->173s, 93 chars->240s on T4):
+    # batch_time ≈ 131s fixed (model load) + 1.18s/char. Use a ~2x safety
+    # margin over the measured slope/intercept since it's only two data
+    # points. parse_issue.py caps total text at 800 chars, which keeps this
+    # well inside the workflow's outer timeout even with a margin this wide.
+    total_chars = count_batch_chars()
+    batch_timeout = 260 + 2 * total_chars
     run(["uv", "run", "indextts2", "batch",
          "--batch-file", str(BATCH_FILE),
          "--model-dir", str(MODEL_DIR),

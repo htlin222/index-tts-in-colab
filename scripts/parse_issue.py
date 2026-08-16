@@ -14,8 +14,15 @@ import os
 import re
 import sys
 
+# Measured on 2026-08-16 (T4, HF_TOKEN set): batch synthesis costs roughly
+# 131s fixed (model load) + 1.18s/char (regressed from two real runs: 36
+# chars->173s, 93 chars->240s). At the old 4000-char cap that alone would be
+# ~80 minutes -- nowhere close to fitting the pipeline's timeouts. 800 chars
+# keeps total run time (env setup + download + synth, including one download
+# retry) comfortably under colab_job/synthesize.py's per-step budgets and
+# the workflow's outer timeouts. See README for the full breakdown.
 MAX_LINES = 40
-MAX_TOTAL_CHARS = 4000
+MAX_TOTAL_CHARS = 800
 VOICE_PATH = "/content/ref.wav"
 DEFAULT_WEIGHT = 0.85
 

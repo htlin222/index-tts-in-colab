@@ -44,7 +44,7 @@ jobs:
       github.event_name == 'workflow_dispatch' ||
       contains(github.event.issue.labels.*.name, 'synthesize')
     runs-on: ubuntu-latest
-    timeout-minutes: 55
+    timeout-minutes: 75
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -156,7 +156,7 @@ jobs:
           # (git clone/uv sync/model download/batch synth) and prints periodic
           # heartbeats; this outer value is just the overall safety net, kept
           # comfortably above the sum of the internal step timeouts.
-          colab --auth=adc exec -s "$SESSION" -f colab_job/synthesize.py --timeout 2700
+          colab --auth=adc exec -s "$SESSION" -f colab_job/synthesize.py --timeout 3600
 
       - name: Download result
         run: |
