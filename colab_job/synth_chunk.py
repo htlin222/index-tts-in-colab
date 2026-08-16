@@ -5,36 +5,45 @@ the model into GPU memory (~131s measured), but not the env build or
 model download.
 
 Expects, uploaded fresh before each call:
-  /content/_common.py         -- shared run() helper
+  /content/_common.py         -- shared run() + concat_wavs_with_fade() helpers
   /content/chunk_index.txt    -- which chunk this call should process, e.g. "2"
   /content/batch_chunk_N.jsonl -- that chunk's indextts2 batch tasks
   /content/ref.wav            -- reference voice clip (uploaded once, reused)
 
 Produces:
   /content/chunk_N.wav
+
+Synthesizes each line to its own file (indextts2 batch's --output-dir mode,
+not --concat) and stitches them ourselves via concat_wavs_with_fade -- see
+that function's docstring for why: indextts2's own --concat writes raw
+digital silence butted directly against full-amplitude audio, which reads
+as an abrupt "click" at every line boundary (2026-08-16 user feedback: the
+cut points sounded wrong). A short fade envelope on each segment fixes
+that without changing the pause durations parse_issue.py already computed.
 """
 import json
 import sys
 from pathlib import Path
 
 sys.path.insert(0, "/content")
-from _common import run  # noqa: E402
+from _common import run, concat_wavs_with_fade  # noqa: E402
 
 WORK = Path("/content")
 REPO = WORK / "index-tts"
 MODEL_DIR = REPO / "checkpoints_2"
 CHUNK_INDEX_FILE = WORK / "chunk_index.txt"
 VOICE_FILE = WORK / "ref.wav"
+SEG_PREFIX = "seg"
 
 
-def count_chars(batch_file):
-    total = 0
+def load_tasks(batch_file):
+    tasks = []
     with open(batch_file, encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if line:
-                total += len(json.loads(line).get("text", ""))
-    return total
+                tasks.append(json.loads(line))
+    return tasks
 
 
 def main():
@@ -46,23 +55,34 @@ def main():
     output_file = WORK / f"chunk_{idx}.wav"
     assert batch_file.is_file(), f"missing {batch_file}"
 
+    tasks = load_tasks(batch_file)
+    total_chars = sum(len(t.get("text", "")) for t in tasks)
     # Regressed from two real runs (36 chars->173s, 93 chars->240s on T4):
     # batch_time ≈ 131s fixed (model load) + 1.18s/char. ~2x safety margin
     # over the measured slope/intercept since it's only two data points.
     # scripts/parse_issue.py caps each chunk at CHUNK_MAX_CHARS=700 chars.
-    total_chars = count_chars(batch_file)
     batch_timeout = 260 + 2 * total_chars
 
+    seg_dir = WORK / f"segs_{idx}"
+    seg_dir.mkdir(exist_ok=True)
     run(["uv", "run", "indextts2", "batch",
          "--batch-file", str(batch_file),
          "--model-dir", str(MODEL_DIR),
-         "--concat", "--output", str(output_file),
+         "--output-dir", str(seg_dir), "--output-prefix", SEG_PREFIX,
          "--no-cuda-kernel", "--force", "--verbose"],
         cwd=str(REPO), timeout=batch_timeout)
 
-    assert output_file.is_file(), f"synthesis finished but {output_file} was not created"
+    segments = []
+    for i, task in enumerate(tasks, start=1):
+        seg_path = seg_dir / f"{SEG_PREFIX}-{i:04d}.wav"
+        assert seg_path.is_file(), f"missing expected segment {seg_path}"
+        segments.append((seg_path, task.get("silence_after_ms", 0)))
+
+    concat_wavs_with_fade(segments, output_file, fade_ms=20)
+
+    assert output_file.is_file(), f"stitched output {output_file} was not created"
     size = output_file.stat().st_size
-    print(f"\n>> chunk {idx} done: {output_file} ({size} bytes)")
+    print(f"\n>> chunk {idx} done: {output_file} ({size} bytes, {len(segments)} segments)")
     if size < 1000:
         raise RuntimeError(f"{output_file} suspiciously small ({size} bytes)")
 

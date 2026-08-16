@@ -65,6 +65,7 @@ gh release create + gh issue comment/close
 - **`google-colab-cli` 0.6.0 的 `colab exec` 不會把遠端程式碼執行失敗回報成失敗**：讀過原始碼確認，它只檢查自己本地拋出的例外（例如外層 `--timeout` 逾時），完全不檢查遠端 kernel 執行的結果——腳本裡的 `sys.exit(1)` 會被靜默吞掉，`colab exec` 照樣回傳 0。這代表 workflow 不能只看 `colab exec` 的 exit code 判斷成敗；每次呼叫都要把輸出 `tee` 出來，自己 grep `FATAL:` 字樣，找到才讓 step 失敗（見 `.github/workflows/synthesize.yml`）。這是 2026-08-16 用真實多 chunk 測試才抓到的——第一次跑的時候模型根本沒下載完，但 workflow 顯示全綠。
 - **參考聲音固定**：用的是 repo 裡 `assets/ref_voice.wav`（7 秒乾淨人聲，已做響度正規化）。目前 v1 不支援每個 issue 換一個參考音檔，如果要換，直接替換這個檔案再 commit。
 - **情緒是整段套用同一個預設**，不支援每行不同情緒。這 6 個預設向量寫死在 `scripts/parse_issue.py` 的 `EMOTION_PRESETS`。
+- **行與行之間的拼接**：`synth_chunk.py` 不用 `indextts2 batch --concat`（那個是直接把靜音貼在滿振幅音訊旁邊，聽起來像硬切/卡頓），改成逐行各自輸出、用 `_common.py` 的 `concat_wavs_with_fade()` 自己拼接，每段頭尾各加 20ms 淡入淡出——停頓長度不變（還是照標點計算），只是把數位懸崖式的切點磨掉。
 - **一次最多 150 行 / 3000 字，單行最多 200 字**，超過會直接失敗（不做靜默截斷）。這個上限是照實測吞吐率算的，不是隨便選的：從兩次真實 run 回歸出 batch 合成時間 ≈ 131s 固定成本（模型載入）+ 1.18s/字。切 chunk 之後總時間會隨字數線性增加，不再有 800 字這種硬牆——但還是需要一個上限，否則一篇超長文章會讓單一 issue 跑好幾小時，吃掉大量 Colab 免費運算額度。3000 字大約切成 4-5 個 chunk，總耗時抓 ~1.5-2 小時。
 - **chunk 大小固定 700 字**（`CHUNK_MAX_CHARS`），每個 chunk 各自付一次「模型重新載入 GPU」的成本（約 131 秒），但環境建置和模型下載只在整個 issue 處理過程付一次。
 
