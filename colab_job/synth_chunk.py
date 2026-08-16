@@ -63,10 +63,22 @@ def main():
     # scripts/parse_issue.py caps each chunk at CHUNK_MAX_CHARS=700 chars.
     batch_timeout = 260 + 2 * total_chars
 
+    # indextts2's batch-file validator rejects `silence_after_ms` outright
+    # unless --concat is passed ("field 'silence_after_ms' is only valid
+    # with --concat") -- confirmed the hard way on 2026-08-16. We're not
+    # using --concat (we stitch ourselves below), so pass indextts2 a
+    # filtered copy without that field; we still have the real values in
+    # `tasks` for concat_wavs_with_fade.
+    row_batch_file = WORK / f"batch_chunk_{idx}_row.jsonl"
+    with open(row_batch_file, "w", encoding="utf-8") as f:
+        for t in tasks:
+            f.write(json.dumps({k: v for k, v in t.items() if k != "silence_after_ms"},
+                                ensure_ascii=False) + "\n")
+
     seg_dir = WORK / f"segs_{idx}"
     seg_dir.mkdir(exist_ok=True)
     run(["uv", "run", "indextts2", "batch",
-         "--batch-file", str(batch_file),
+         "--batch-file", str(row_batch_file),
          "--model-dir", str(MODEL_DIR),
          "--output-dir", str(seg_dir), "--output-prefix", SEG_PREFIX,
          "--no-cuda-kernel", "--force", "--verbose"],
