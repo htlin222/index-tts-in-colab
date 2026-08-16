@@ -153,15 +153,32 @@ jobs:
 
       - name: Build environment and download models (once per issue)
         run: |
+          set -o pipefail
           SESSION="${{ steps.colab_new.outputs.session }}"
           # colab exec's default --timeout is 30s, meant for short interactive
           # cells. setup.py enforces its own per-step timeouts internally
           # (git clone/uv sync/model download/check) and prints periodic
           # heartbeats; this outer value is just the overall safety net.
-          colab --auth=adc exec -s "$SESSION" -f colab_job/setup.py --timeout 3000
+          #
+          # google-colab-cli 0.6.0's `exec` never inspects the executed
+          # code's own outcome -- it only fails on a *local* exception (e.g.
+          # this outer --timeout firing). A script-side sys.exit(1) inside
+          # the remote kernel is silently swallowed and `colab exec` still
+          # exits 0. Confirmed on 2026-08-16: setup.py exhausted all 3
+          # download retries, printed "FATAL: ...", and the step still
+          # reported success -- the run went on to "synthesize" against a
+          # session with no model weights on disk. Until upstream fixes
+          # this, grep the captured output for our own FATAL marker.
+          colab --auth=adc exec -s "$SESSION" -f colab_job/setup.py --timeout 3000 \
+            2>&1 | tee /tmp/exec_setup.log
+          if grep -q '^FATAL:' /tmp/exec_setup.log; then
+            echo "::error::setup.py reported FATAL (see log above) -- colab exec masked this as success"
+            exit 1
+          fi
 
       - name: Synthesize each chunk on the warm session
         run: |
+          set -o pipefail
           SESSION="${{ steps.colab_new.outputs.session }}"
           N=$(cat chunk_count.txt)
           echo "synthesizing $N chunk(s)"
@@ -174,14 +191,27 @@ jobs:
             # and model weights are already on disk from the setup step).
             # 1800s covers CHUNK_MAX_CHARS=700 with margin; see
             # scripts/parse_issue.py for the throughput math.
-            colab --auth=adc exec -s "$SESSION" -f colab_job/synth_chunk.py --timeout 1800
+            # See the FATAL-grep note in the setup step above -- same
+            # colab-exec exit-code gap applies here.
+            colab --auth=adc exec -s "$SESSION" -f colab_job/synth_chunk.py --timeout 1800 \
+              2>&1 | tee "/tmp/exec_chunk_$i.log"
+            if grep -q '^FATAL:' "/tmp/exec_chunk_$i.log"; then
+              echo "::error::synth_chunk.py failed on chunk $i (see log above)"
+              exit 1
+            fi
           done
 
       - name: Concatenate chunks and download result
         run: |
+          set -o pipefail
           SESSION="${{ steps.colab_new.outputs.session }}"
           colab --auth=adc upload -s "$SESSION" chunk_count.txt /content/chunk_count.txt
-          colab --auth=adc exec -s "$SESSION" -f colab_job/concat_chunks.py --timeout 120
+          colab --auth=adc exec -s "$SESSION" -f colab_job/concat_chunks.py --timeout 120 \
+            2>&1 | tee /tmp/exec_concat.log
+          if grep -q '^FATAL:' /tmp/exec_concat.log; then
+            echo "::error::concat_chunks.py failed (see log above)"
+            exit 1
+          fi
           colab --auth=adc download -s "$SESSION" /content/output.wav ./output.wav
           ls -lh output.wav
 

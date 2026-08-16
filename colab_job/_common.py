@@ -36,8 +36,19 @@ def run(cmd, cwd=None, timeout=600, retries=0, retry_backoff=30):
             while proc.poll() is None:
                 elapsed = time.monotonic() - start
                 if elapsed > timeout:
-                    proc.kill()
-                    proc.wait()
+                    # SIGTERM first, not SIGKILL: a killed huggingface_hub
+                    # download can leave stale .lock files in its cache dir,
+                    # which then makes the *next* retry attempt hang waiting
+                    # on a lock nobody holds -- plausibly what happened on
+                    # 2026-08-16 (2 of 3 retries stalled at exactly 58 bytes
+                    # for the full timeout with zero growth). Give it a
+                    # chance to clean up before escalating.
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=15)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        proc.wait()
                     timed_out = True
                     break
                 time.sleep(HEARTBEAT_SECONDS)
