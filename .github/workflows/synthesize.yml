@@ -44,7 +44,10 @@ jobs:
       github.event_name == 'workflow_dispatch' ||
       contains(github.event.issue.labels.*.name, 'synthesize')
     runs-on: ubuntu-latest
-    timeout-minutes: 75
+    # A long request can span many chunks (see scripts/parse_issue.py);
+    # each colab-exec call is individually bounded, but the sum across a
+    # worst-case chunk count needs headroom. See README for the math.
+    timeout-minutes: 150
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -139,28 +142,46 @@ jobs:
             printf '%s' "$HF_TOKEN" > hf_token.txt
           fi
 
-      - name: Upload reference audio and batch file
+      - name: Upload shared inputs (ref audio, helper module, HF token)
         run: |
           SESSION="${{ steps.colab_new.outputs.session }}"
           colab --auth=adc upload -s "$SESSION" assets/ref_voice.wav /content/ref.wav
-          colab --auth=adc upload -s "$SESSION" batch.jsonl /content/batch.jsonl
+          colab --auth=adc upload -s "$SESSION" colab_job/_common.py /content/_common.py
           if [ -f hf_token.txt ]; then
             colab --auth=adc upload -s "$SESSION" hf_token.txt /content/hf_token
           fi
 
-      - name: Run synthesis on Colab GPU
+      - name: Build environment and download models (once per issue)
         run: |
           SESSION="${{ steps.colab_new.outputs.session }}"
           # colab exec's default --timeout is 30s, meant for short interactive
-          # cells. synthesize.py enforces its own per-step timeouts internally
-          # (git clone/uv sync/model download/batch synth) and prints periodic
-          # heartbeats; this outer value is just the overall safety net, kept
-          # comfortably above the sum of the internal step timeouts.
-          colab --auth=adc exec -s "$SESSION" -f colab_job/synthesize.py --timeout 3600
+          # cells. setup.py enforces its own per-step timeouts internally
+          # (git clone/uv sync/model download/check) and prints periodic
+          # heartbeats; this outer value is just the overall safety net.
+          colab --auth=adc exec -s "$SESSION" -f colab_job/setup.py --timeout 3000
 
-      - name: Download result
+      - name: Synthesize each chunk on the warm session
         run: |
           SESSION="${{ steps.colab_new.outputs.session }}"
+          N=$(cat chunk_count.txt)
+          echo "synthesizing $N chunk(s)"
+          for i in $(seq 0 $((N - 1))); do
+            echo "=== chunk $i/$((N - 1)) ==="
+            echo -n "$i" > chunk_index.txt
+            colab --auth=adc upload -s "$SESSION" chunk_index.txt /content/chunk_index.txt
+            colab --auth=adc upload -s "$SESSION" "batch_chunk_$i.jsonl" "/content/batch_chunk_$i.jsonl"
+            # Each call only pays model-load + that chunk's synth time (env
+            # and model weights are already on disk from the setup step).
+            # 1800s covers CHUNK_MAX_CHARS=700 with margin; see
+            # scripts/parse_issue.py for the throughput math.
+            colab --auth=adc exec -s "$SESSION" -f colab_job/synth_chunk.py --timeout 1800
+          done
+
+      - name: Concatenate chunks and download result
+        run: |
+          SESSION="${{ steps.colab_new.outputs.session }}"
+          colab --auth=adc upload -s "$SESSION" chunk_count.txt /content/chunk_count.txt
+          colab --auth=adc exec -s "$SESSION" -f colab_job/concat_chunks.py --timeout 120
           colab --auth=adc download -s "$SESSION" /content/output.wav ./output.wav
           ls -lh output.wav
 

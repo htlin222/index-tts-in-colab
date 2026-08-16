@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Parse a GitHub issue-form body into an indextts2 batch JSONL file.
+"""Parse a GitHub issue-form body into chunked indextts2 batch JSONL files.
 
 Reads the raw issue body from the ISSUE_BODY env var (never interpolate
 untrusted issue content directly into a shell `run:` block — pass it via
@@ -8,6 +8,19 @@ untrusted issue content directly into a shell `run:` block — pass it via
 Emotion vector order (IndexTTS-2, 8-dim): [happy, angry, sad, afraid,
 disgusted, melancholic, surprised, calm]. Each preset's sum is kept <= 0.8,
 the hard limit enforced by the `indextts2` CLI's batch-file validator.
+
+Output is CHUNKED rather than a single batch.jsonl: colab_job/setup.py pays
+the env-build + model-download cost once per issue, then colab_job/
+synth_chunk.py runs once per chunk file against the same warm Colab
+session, so a long request costs (setup once) + (chunks * per-chunk
+synth), not (chunks * full pipeline). See README for the throughput math
+behind CHUNK_MAX_CHARS.
+
+Writes:
+  batch_chunk_0.jsonl, batch_chunk_1.jsonl, ...  -- one indextts2 batch file
+                                                     per chunk
+  chunk_count.txt                                -- integer, for the
+                                                     workflow's loop
 """
 import json
 import os
@@ -16,13 +29,15 @@ import sys
 
 # Measured on 2026-08-16 (T4, HF_TOKEN set): batch synthesis costs roughly
 # 131s fixed (model load) + 1.18s/char (regressed from two real runs: 36
-# chars->173s, 93 chars->240s). At the old 4000-char cap that alone would be
-# ~80 minutes -- nowhere close to fitting the pipeline's timeouts. 800 chars
-# keeps total run time (env setup + download + synth, including one download
-# retry) comfortably under colab_job/synthesize.py's per-step budgets and
-# the workflow's outer timeouts. See README for the full breakdown.
-MAX_LINES = 40
-MAX_TOTAL_CHARS = 800
+# chars->173s, 93 chars->240s). CHUNK_MAX_CHARS keeps each individual
+# colab-exec call's synthesis time predictable and comfortably inside its
+# own timeout; MAX_TOTAL_CHARS bounds how many chunks (and therefore how
+# much total wall-clock and Colab compute quota) a single issue can cost.
+# See README for the full breakdown.
+MAX_LINES = 150
+MAX_TOTAL_CHARS = 3000
+CHUNK_MAX_CHARS = 700
+MAX_LINE_CHARS = 200  # a single absurdly long line would blow a chunk's budget alone
 VOICE_PATH = "/content/ref.wav"
 DEFAULT_WEIGHT = 0.85
 
@@ -84,6 +99,44 @@ def silence_after(line):
     return 350
 
 
+def build_tasks(lines, vector, weight):
+    tasks = []
+    for i, line in enumerate(lines):
+        tasks.append({
+            "text": line,
+            "voice": VOICE_PATH,
+            "emotion_vector": vector,
+            "emotion_weight": weight,
+            "silence_after_ms": 0 if i == len(lines) - 1 else silence_after(line),
+        })
+    return tasks
+
+
+def chunk_tasks(tasks, chunk_max_chars):
+    """Group tasks (in order) into chunks, each staying under chunk_max_chars.
+
+    A single task is never split. Each task's own silence_after_ms is left
+    untouched (computed once over the full, un-chunked line sequence), so
+    the pause at a chunk boundary is whatever the punctuation there implied
+    -- chunking doesn't create or remove pauses, just where the underlying
+    indextts2 batch calls are split.
+    """
+    chunks = []
+    current = []
+    current_chars = 0
+    for task in tasks:
+        n = len(task["text"])
+        if current and current_chars + n > chunk_max_chars:
+            chunks.append(current)
+            current = []
+            current_chars = 0
+        current.append(task)
+        current_chars += n
+    if current:
+        chunks.append(current)
+    return chunks
+
+
 def main():
     body = os.environ.get("ISSUE_BODY", "")
     if not body.strip():
@@ -100,6 +153,10 @@ def main():
         die("no non-empty lines found in 要朗讀的文字")
     if len(lines) > MAX_LINES:
         die(f"too many lines: {len(lines)} > {MAX_LINES} limit")
+    too_long = [ln for ln in lines if len(ln) > MAX_LINE_CHARS]
+    if too_long:
+        die(f"a single line exceeds {MAX_LINE_CHARS} chars ({len(too_long[0])} chars); "
+            f"break it into shorter lines: {too_long[0][:40]}...")
     total_chars = sum(len(ln) for ln in lines)
     if total_chars > MAX_TOTAL_CHARS:
         die(f"text too long: {total_chars} chars > {MAX_TOTAL_CHARS} limit")
@@ -108,22 +165,19 @@ def main():
     weight = pick_weight(sections.get("情緒強度 (0.1 - 1.0)"))
     vector = EMOTION_PRESETS[emotion_name]
 
-    tasks = []
-    for i, line in enumerate(lines):
-        task = {
-            "text": line,
-            "voice": VOICE_PATH,
-            "emotion_vector": vector,
-            "emotion_weight": weight,
-            "silence_after_ms": 0 if i == len(lines) - 1 else silence_after(line),
-        }
-        tasks.append(task)
+    tasks = build_tasks(lines, vector, weight)
+    chunks = chunk_tasks(tasks, CHUNK_MAX_CHARS)
 
-    with open("batch.jsonl", "w", encoding="utf-8") as f:
-        for t in tasks:
-            f.write(json.dumps(t, ensure_ascii=False) + "\n")
+    for i, chunk in enumerate(chunks):
+        with open(f"batch_chunk_{i}.jsonl", "w", encoding="utf-8") as f:
+            for t in chunk:
+                f.write(json.dumps(t, ensure_ascii=False) + "\n")
 
-    print(f"parsed {len(tasks)} lines, emotion={emotion_name}, weight={weight}", file=sys.stderr)
+    with open("chunk_count.txt", "w", encoding="utf-8") as f:
+        f.write(str(len(chunks)))
+
+    print(f"parsed {len(tasks)} lines / {total_chars} chars into {len(chunks)} chunk(s), "
+          f"emotion={emotion_name}, weight={weight}", file=sys.stderr)
 
 
 if __name__ == "__main__":
