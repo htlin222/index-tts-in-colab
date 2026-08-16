@@ -1,0 +1,54 @@
+# index-tts-in-colab
+
+開一個 GitHub Issue → GitHub Action 解析內容 → 呼叫 [Colab CLI](https://github.com/googlecolab/google-colab-cli) 在免費 T4 GPU 上跑 [IndexTTS-2](https://github.com/index-tts/index-tts) zero-shot 聲音克隆 → 把合成好的 `.wav` 發成 GitHub Release，並在 issue 留言連結。
+
+## 使用方式
+
+1. 開一個新 issue，選 **🎙️ 語音合成請求** 範本
+2. 填要朗讀的文字（每行一段）、情緒、情緒強度
+3. 送出後等 Action 跑完（約 15–25 分鐘，第一次含環境建置與模型下載）
+4. Issue 底下會自動留言 Release 連結，issue 自動關閉
+
+也可以用 **Actions → synthesize → Run workflow** 手動觸發，不用開 issue。
+
+## 架構
+
+```
+issue (opened, label=synthesize)
+  │
+  ▼
+scripts/parse_issue.py      ─→ batch.jsonl（每行一段，情緒向量套用同一預設）
+  │
+  ▼
+colab CLI（GitHub Secrets 裡的 ADC 憑證）
+  │  colab new -s ci-<run_id> --gpu T4
+  │  colab upload  ref.wav / batch.jsonl
+  │  colab exec    colab_job/synthesize.py   ← 在 Colab VM 上跑 indextts2 batch
+  │  colab download output.wav
+  │  colab stop
+  ▼
+gh release create + gh issue comment/close
+```
+
+## 已知限制 / 之後可以做的事
+
+- **同時只能有一個 GPU runtime**（Colab 免費帳號限制）。Workflow 用 `concurrency` group 序列化多個 issue，但如果有人開著瀏覽器裡的互動式 Colab notebook 占用 T4，CI 會直接失敗（`TooManyAssignmentsError`）。發生時去 [colab.research.google.com](https://colab.research.google.com) → 執行階段 → 管理工作階段 把它斷開。
+- **每次 run 都是全新 VM**，環境建置＋模型下載（~6GB）沒有快取，每次都要重來一遍，佔掉大部分時間。要加速可以考慮把 venv/checkpoints 打包存 Drive，run 開始時解壓——目前先不做，避免過早優化。
+- **參考聲音固定**：用的是 repo 裡 `assets/ref_voice.wav`（7 秒乾淨人聲，已做響度正規化）。目前 v1 不支援每個 issue 換一個參考音檔，如果要換，直接替換這個檔案再 commit。
+- **情緒是整段套用同一個預設**，不支援每行不同情緒。這 6 個預設向量寫死在 `scripts/parse_issue.py` 的 `EMOTION_PRESETS`。
+- 一次最多 40 行 / 4000 字，超過會直接失敗（不做靜默截斷）。
+
+## 一次性設定（repo owner 才需要做）
+
+Colab CLI 用你 Google 帳號的 [Application Default Credentials](https://cloud.google.com/docs/authentication/application-default-credentials) 認證。這把憑證存進 GitHub Secrets 後，CI 就能用你的身分開 Colab GPU session——這代表：
+
+- CI 會消耗你 Google 帳號的 Colab 免費運算額度
+- 這把憑證的 scope 含 `cloud-platform`，範圍不小；repo 若被別人拿到寫入權限（例如接受了惡意 PR 改 workflow），這把憑證等於被盜用
+- 想收回權限，去 [Google 帳號權限頁](https://myaccount.google.com/permissions) 撤銷 `colab-cli` 這個 OAuth 應用程式，並在 GitHub 上刪掉 `COLAB_ADC_CREDENTIALS` secret
+
+```bash
+gcloud auth application-default login \
+  --scopes=openid,https://www.googleapis.com/auth/cloud-platform,https://www.googleapis.com/auth/userinfo.email,https://www.googleapis.com/auth/colaboratory
+
+gh secret set COLAB_ADC_CREDENTIALS < ~/.config/gcloud/application_default_credentials.json
+```

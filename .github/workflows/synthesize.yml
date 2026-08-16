@@ -1,0 +1,174 @@
+name: synthesize
+
+on:
+  issues:
+    types: [opened]
+  workflow_dispatch:
+    inputs:
+      text:
+        description: "要朗讀的文字（每行一段）"
+        required: true
+        default: |
+          君不見，黃河之水天上來，奔流到海不復回。
+          人生得意須盡歡，莫使金樽空對月。
+      emotion:
+        description: "情緒"
+        required: true
+        type: choice
+        default: "自然 (neutral)"
+        options:
+          - "自然 (neutral)"
+          - "高興 (happy)"
+          - "憤怒 (angry)"
+          - "悲傷 (sad)"
+          - "低落 (melancholic)"
+          - "驚訝 (surprised)"
+      weight:
+        description: "情緒強度 (0.1 - 1.0)"
+        required: false
+        default: "0.85"
+
+# Colab's free tier allows only one GPU runtime at a time on this account,
+# so serialize all synthesis runs instead of letting them race each other.
+concurrency:
+  group: colab-gpu-synthesis
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  synthesize:
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      contains(github.event.issue.labels.*.name, 'synthesize')
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build issue-form-shaped body (workflow_dispatch path)
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          IN_TEXT: ${{ inputs.text }}
+          IN_EMOTION: ${{ inputs.emotion }}
+          IN_WEIGHT: ${{ inputs.weight }}
+        run: |
+          {
+            echo "### 要朗讀的文字"
+            echo
+            echo "$IN_TEXT"
+            echo
+            echo "### 情緒"
+            echo
+            echo "$IN_EMOTION"
+            echo
+            echo "### 情緒強度 (0.1 - 1.0)"
+            echo
+            echo "$IN_WEIGHT"
+          } > synthetic_body.md
+          echo "SYNTHETIC_BODY_FILE=synthetic_body.md" >> "$GITHUB_ENV"
+
+      - name: Parse request into batch.jsonl
+        env:
+          # Never splice untrusted issue content into a shell `run:` block directly —
+          # passing it through `env:` keeps it out of shell interpolation.
+          ISSUE_BODY_FROM_ISSUE: ${{ github.event.issue.body }}
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            ISSUE_BODY="$(cat "$SYNTHETIC_BODY_FILE")"
+          else
+            ISSUE_BODY="$ISSUE_BODY_FROM_ISSUE"
+          fi
+          export ISSUE_BODY
+          python3 scripts/parse_issue.py
+
+      - name: Install Colab CLI
+        run: |
+          pip install --user google-colab-cli
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Write Colab ADC credentials
+        env:
+          COLAB_ADC_JSON: ${{ secrets.COLAB_ADC_CREDENTIALS }}
+        run: |
+          if [ -z "$COLAB_ADC_JSON" ]; then
+            echo "::error::COLAB_ADC_CREDENTIALS secret is not set. See README for setup."
+            exit 1
+          fi
+          mkdir -p "$HOME/.config/gcloud"
+          printf '%s' "$COLAB_ADC_JSON" > "$HOME/.config/gcloud/application_default_credentials.json"
+
+      - name: Provision Colab T4 session
+        id: colab_new
+        run: |
+          SESSION="ci-${{ github.run_id }}"
+          echo "session=$SESSION" >> "$GITHUB_OUTPUT"
+          colab --auth=adc new -s "$SESSION" --gpu T4
+
+      - name: Upload reference audio and batch file
+        run: |
+          SESSION="${{ steps.colab_new.outputs.session }}"
+          colab --auth=adc upload -s "$SESSION" assets/ref_voice.wav /content/ref.wav
+          colab --auth=adc upload -s "$SESSION" batch.jsonl /content/batch.jsonl
+
+      - name: Run synthesis on Colab GPU
+        run: |
+          SESSION="${{ steps.colab_new.outputs.session }}"
+          colab --auth=adc exec -s "$SESSION" -f colab_job/synthesize.py
+
+      - name: Download result
+        run: |
+          SESSION="${{ steps.colab_new.outputs.session }}"
+          colab --auth=adc download -s "$SESSION" /content/output.wav ./output.wav
+          ls -lh output.wav
+
+      - name: Stop Colab session
+        if: always()
+        run: |
+          SESSION="${{ steps.colab_new.outputs.session }}"
+          colab --auth=adc stop -s "$SESSION" || true
+
+      - name: Create Release with audio
+        if: success()
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "${{ github.event_name }}" = "issues" ]; then
+            TAG="issue-${{ github.event.issue.number }}-run${{ github.run_number }}"
+            TITLE="將進酒朗讀 — issue #${{ github.event.issue.number }}"
+          else
+            TAG="manual-run${{ github.run_number }}"
+            TITLE="將進酒朗讀 — manual run ${{ github.run_number }}"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          gh release create "$TAG" output.wav \
+            --title "$TITLE" \
+            --notes "Generated by IndexTTS-2 on a Colab T4 GPU. Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+      - name: Comment result on issue
+        if: success() && github.event_name == 'issues'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh issue comment ${{ github.event.issue.number }} --body \
+            "🎧 合成完成：${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ steps.release.outputs.tag }}"
+          gh issue close ${{ github.event.issue.number }}
+
+      - name: Comment failure on issue
+        if: failure() && github.event_name == 'issues'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh issue comment ${{ github.event.issue.number }} --body \
+            "❌ 合成失敗，詳細記錄： ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+          常見原因：Colab 免費帳號同時只能有一個 GPU runtime；如果有人正在用瀏覽器開著另一個 Colab notebook 占用 T4，這裡就會失敗。關掉那個分頁再重開一次 issue，或編輯這則 issue 觸發重試。"
