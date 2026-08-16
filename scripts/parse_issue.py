@@ -21,6 +21,9 @@ Writes:
                                                      per chunk
   chunk_count.txt                                -- integer, for the
                                                      workflow's loop
+  model_version.txt                              -- "2.0" or "2.5", for
+                                                     colab_job/setup.py and
+                                                     synth_chunk.py
 """
 import json
 import os
@@ -89,6 +92,23 @@ def pick_weight(raw):
     if not (0.1 <= w <= 1.0):
         die(f"emotion weight must be between 0.1 and 1.0, got {w}")
     return w
+
+
+def pick_model_version(raw):
+    raw = (raw or "").strip()
+    # Default 2.0: IndexTTS-2.5 requires a lang="zh" conditioning token with
+    # no Taiwan-Mandarin variant available (only generic "zh", confirmed by
+    # reading indextts/utils/tokenizer.py's LANGUAGES dict), which leaned a
+    # Taiwanese reference voice's output toward a Mainland accent
+    # (2026-08-16 user feedback). infer_v2.py (2.0) has no such token and
+    # just clones whatever accent is in the reference clip.
+    if not raw or raw == "_No response_":
+        return "2.0"
+    if "2.5" in raw:
+        return "2.5"
+    if "2.0" in raw:
+        return "2.0"
+    die(f"unrecognized model version option: {raw!r}")
 
 
 def silence_after(line):
@@ -164,6 +184,7 @@ def main():
     emotion_name = pick_emotion(sections.get("情緒"))
     weight = pick_weight(sections.get("情緒強度 (0.1 - 1.0)"))
     vector = EMOTION_PRESETS[emotion_name]
+    model_version = pick_model_version(sections.get("模型版本"))
 
     tasks = build_tasks(lines, vector, weight)
     chunks = chunk_tasks(tasks, CHUNK_MAX_CHARS)
@@ -176,8 +197,11 @@ def main():
     with open("chunk_count.txt", "w", encoding="utf-8") as f:
         f.write(str(len(chunks)))
 
+    with open("model_version.txt", "w", encoding="utf-8") as f:
+        f.write(model_version)
+
     print(f"parsed {len(tasks)} lines / {total_chars} chars into {len(chunks)} chunk(s), "
-          f"emotion={emotion_name}, weight={weight}", file=sys.stderr)
+          f"emotion={emotion_name}, weight={weight}, model_version={model_version}", file=sys.stderr)
 
 
 if __name__ == "__main__":

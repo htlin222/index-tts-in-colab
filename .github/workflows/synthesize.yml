@@ -27,6 +27,14 @@ on:
         description: "情緒強度 (0.1 - 1.0)"
         required: false
         default: "0.85"
+      model_version:
+        description: "模型版本"
+        required: true
+        type: choice
+        default: "2.0（貼近參考音檔原始腔調，推薦）"
+        options:
+          - "2.0（貼近參考音檔原始腔調，推薦）"
+          - "2.5（較快，但中文偏大陸腔）"
 
 # Colab's free tier allows only one GPU runtime at a time on this account,
 # so serialize all synthesis runs instead of letting them race each other.
@@ -63,6 +71,7 @@ jobs:
           IN_TEXT: ${{ inputs.text }}
           IN_EMOTION: ${{ inputs.emotion }}
           IN_WEIGHT: ${{ inputs.weight }}
+          IN_MODEL_VERSION: ${{ inputs.model_version }}
         run: |
           {
             echo "### 要朗讀的文字"
@@ -76,6 +85,10 @@ jobs:
             echo "### 情緒強度 (0.1 - 1.0)"
             echo
             echo "$IN_WEIGHT"
+            echo
+            echo "### 模型版本"
+            echo
+            echo "$IN_MODEL_VERSION"
           } > synthetic_body.md
           echo "SYNTHETIC_BODY_FILE=synthetic_body.md" >> "$GITHUB_ENV"
 
@@ -148,6 +161,7 @@ jobs:
           colab --auth=adc upload -s "$SESSION" assets/ref_voice.wav /content/ref.wav
           colab --auth=adc upload -s "$SESSION" colab_job/_common.py /content/_common.py
           colab --auth=adc upload -s "$SESSION" colab_job/_synth_inner_25.py /content/_synth_inner_25.py
+          colab --auth=adc upload -s "$SESSION" model_version.txt /content/model_version.txt
           if [ -f hf_token.txt ]; then
             colab --auth=adc upload -s "$SESSION" hf_token.txt /content/hf_token
           fi

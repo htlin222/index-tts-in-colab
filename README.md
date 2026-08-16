@@ -2,12 +2,12 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![synthesize](https://github.com/htlin222/index-tts-in-colab/actions/workflows/synthesize.yml/badge.svg)](https://github.com/htlin222/index-tts-in-colab/actions/workflows/synthesize.yml)
-[![IndexTTS-2](https://img.shields.io/badge/model-IndexTTS--2.5-blue)](https://github.com/index-tts/index-tts)
+[![IndexTTS](https://img.shields.io/badge/model-IndexTTS--2%20%2F%202.5-blue)](https://github.com/index-tts/index-tts)
 [![Colab CLI](https://img.shields.io/badge/runtime-Colab%20CLI-orange)](https://github.com/googlecolab/google-colab-cli)
 
-**Open a GitHub issue, get zero-shot voice-cloned speech back as a Release.** This repo wires up a full serverless text-to-speech pipeline entirely on free infrastructure: a GitHub Issue form triggers a GitHub Actions workflow, which provisions a free Google Colab T4 GPU via the official [Colab CLI](https://github.com/googlecolab/google-colab-cli), runs [IndexTTS-2.5](https://github.com/index-tts/index-tts) zero-shot voice cloning, and publishes the resulting `.wav` as a GitHub Release — no server, no persistent infra, no manual steps. Long text is automatically split into chunks and processed on the same warm Colab session so the ~10-minute environment/model-download cost is paid once per request, not once per chunk. See the [architecture](#架構) and [known limitations](#已知限制--之後可以做的事) sections below (Traditional Chinese) for the full design.
+**Open a GitHub issue, get zero-shot voice-cloned speech back as a Release.** This repo wires up a full serverless text-to-speech pipeline entirely on free infrastructure: a GitHub Issue form triggers a GitHub Actions workflow, which provisions a free Google Colab T4 GPU via the official [Colab CLI](https://github.com/googlecolab/google-colab-cli), runs [IndexTTS-2 or 2.5](https://github.com/index-tts/index-tts) zero-shot voice cloning (chooser in the issue form; 2.0 is the default -- see [known limitations](#已知限制--之後可以做的事) for why), and publishes the resulting `.wav` as a GitHub Release — no server, no persistent infra, no manual steps. Long text is automatically split into chunks and processed on the same warm Colab session so the ~10-minute environment/model-download cost is paid once per request, not once per chunk. See the [architecture](#架構) and [known limitations](#已知限制--之後可以做的事) sections below (Traditional Chinese) for the full design.
 
-開一個 GitHub Issue → GitHub Action 解析內容 → 呼叫 [Colab CLI](https://github.com/googlecolab/google-colab-cli) 在免費 T4 GPU 上跑 [IndexTTS-2.5](https://github.com/index-tts/index-tts) zero-shot 聲音克隆 → 把合成好的 `.wav` 發成 GitHub Release，並在 issue 留言連結。
+開一個 GitHub Issue → GitHub Action 解析內容 → 呼叫 [Colab CLI](https://github.com/googlecolab/google-colab-cli) 在免費 T4 GPU 上跑 [IndexTTS-2 或 2.5](https://github.com/index-tts/index-tts)（issue 表單可選，預設 2.0）zero-shot 聲音克隆 → 把合成好的 `.wav` 發成 GitHub Release，並在 issue 留言連結。
 
 ## 目錄
 
@@ -57,7 +57,10 @@ gh release create + gh issue comment/close
 
 `colab exec -f script.py` 是把腳本內容當程式碼送進遠端 kernel 執行，不是把檔案放到 VM 硬碟上，所以 `setup.py` / `synth_chunk.py` 之間不能直接互相 import——共用的 `run()`（timeout／心跳／重試邏輯）額外用 `colab upload` 放成 `/content/_common.py`，兩支腳本都從那裡 import。
 
-用的是 **IndexTTS-2.5**（`IndexTeam/IndexTTS-2.5`），不是 2.0。官方 `indextts2` CLI 只包了 `infer_v2.py`（2.0），沒有包 `infer_v2_5.py`——`indextts2 download`/`indextts2 batch` 都是寫死抓 2.0。所以 `setup.py` 自己呼叫 index-tts 內部的 `snapshot_download`/`ensure_models_available` 抓 2.5 權重，`synth_chunk.py` 也不走 `indextts2 batch`，改成呼叫另外上傳的 `_synth_inner_25.py`（在 uv venv 內直接 `import indextts.infer_v2_5.IndexTTS2`，逐行呼叫 `.infer()`）。順便省了 2.0 版必抓、但我們用不到的 QwenEmotion 模型（~1.2GB，只有 `emo_text` 模式才需要，我們一直只用 `emo_vector`）。
+**模型版本可選 IndexTTS-2 或 2.5**，issue 表單有下拉選單，預設 2.0——原因見下面「已知限制」。`setup.py`/`synth_chunk.py` 都用同一個 `/content/model_version.txt` 標記檔（`colab upload` 上傳，內容 `"2.0"` 或 `"2.5"`）決定走哪條路：
+
+- **2.0**：走官方 `indextts2` CLI（`indextts2 download`/`indextts2 batch`）
+- **2.5**：官方 `indextts2` CLI 只包了 `infer_v2.py`（2.0），沒有包 `infer_v2_5.py`。`setup.py` 自己呼叫 index-tts 內部的 `snapshot_download`/`ensure_models_available` 抓 2.5 權重（順便省了用不到的 QwenEmotion ~1.2GB，只有 `emo_text` 模式才需要，我們一直只用 `emo_vector`），`synth_chunk.py` 改呼叫另外上傳的 `_synth_inner_25.py`（在 uv venv 內直接 `import indextts.infer_v2_5.IndexTTS2`，逐行呼叫 `.infer()`）。
 
 ## 已知限制 / 之後可以做的事
 
@@ -70,6 +73,7 @@ gh release create + gh issue comment/close
 - **行與行之間的拼接**：`synth_chunk.py` 不用 `indextts2 batch --concat`（那個是直接把靜音貼在滿振幅音訊旁邊，聽起來像硬切/卡頓），改成逐行各自輸出、用 `_common.py` 的 `concat_wavs_with_fade()` 自己拼接，每段頭尾各加 20ms 淡入淡出——停頓長度不變（還是照標點計算），只是把數位懸崖式的切點磨掉。
 - **一次最多 150 行 / 3000 字，單行最多 200 字**，超過會直接失敗（不做靜默截斷）。這個上限是照實測吞吐率算的，不是隨便選的：從兩次真實 run 回歸出 batch 合成時間 ≈ 131s 固定成本（模型載入）+ 1.18s/字。切 chunk 之後總時間會隨字數線性增加，不再有 800 字這種硬牆——但還是需要一個上限，否則一篇超長文章會讓單一 issue 跑好幾小時，吃掉大量 Colab 免費運算額度。3000 字大約切成 4-5 個 chunk，總耗時抓 ~1.5-2 小時。
 - **chunk 大小固定 700 字**（`CHUNK_MAX_CHARS`），每個 chunk 各自付一次「模型重新載入 GPU」的成本（約 131 秒），但環境建置和模型下載只在整個 issue 處理過程付一次。
+- **IndexTTS-2.5 對台灣腔使用者不友善，這是預設 2.0 的原因**：2026-08-16 實測發現，用台灣人的參考音檔跑 2.5，輸出聽起來像被加了大陸腔。追原始碼確認：`infer_v2_5.py` 的 `.infer()` 強制要求 `lang` 參數，內部轉成一個語言條件 token（`lang_to_token()`）直接餵進模型；`indextts/utils/tokenizer.py` 的 `LANGUAGES` 字典裡中文只有一個泛用的 `"zh"`（沒有 `zh-tw`/`zh-cn` 的區分，看起來是直接沿用 Whisper 那份語言清單），這個 token 把輸出往模型訓練資料的「標準中文」音素習慣拉。反觀 `infer_v2.py`（2.0）的 `.infer()` 簽名裡**完全沒有 `lang` 參數**，純粹靠參考音檔本身的腔調做零樣本克隆，不會被語言條件覆蓋。2.5 有 `<文字|拼音>` 這種逐字發音標注語法（例如 `<和|HAN4>`）可以修正個別異讀字，但改不了整體語調節奏，且沒有內建的「台灣模式」——要做的話得自己維護一份異讀字對照表，目前沒做。
 
 ## 一次性設定（repo owner 才需要做）
 
@@ -101,4 +105,4 @@ gh secret set HF_TOKEN --repo htlin222/index-tts-in-colab
 
 ## License
 
-這個 repo 自己的程式碼（workflow / issue 表單 / `scripts/`、`colab_job/` 底下的腳本）採用 [MIT License](LICENSE)。它在 runtime clone 的 [index-tts](https://github.com/index-tts/index-tts) 原始碼和從 [HuggingFace 下載的 IndexTTS-2.5 模型權重](https://huggingface.co/IndexTeam/IndexTTS-2.5)各自有自己的授權（Bilibili 自訂授權，不是 MIT），不在這個 MIT 範圍內。
+這個 repo 自己的程式碼（workflow / issue 表單 / `scripts/`、`colab_job/` 底下的腳本）採用 [MIT License](LICENSE)。它在 runtime clone 的 [index-tts](https://github.com/index-tts/index-tts) 原始碼，以及從 HuggingFace 下載的 [IndexTTS-2](https://huggingface.co/IndexTeam/IndexTTS-2) / [IndexTTS-2.5](https://huggingface.co/IndexTeam/IndexTTS-2.5) 模型權重，各自有自己的授權（Bilibili 自訂授權，不是 MIT），不在這個 MIT 範圍內。

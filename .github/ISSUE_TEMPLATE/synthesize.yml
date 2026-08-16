@@ -42,3 +42,14 @@ body:
       placeholder: "0.85"
     validations:
       required: false
+  - type: dropdown
+    id: model_version
+    attributes:
+      label: 模型版本
+      description: 2.5 比較快、支援語速控制，但中文語音會偏向大陸腔（強制的語言 token 沒有台灣腔選項）；2.0 沒有這個 token，比較貼近參考音檔本身的腔調。不確定就選 2.0。
+      options:
+        - "2.0（貼近參考音檔原始腔調，推薦）"
+        - "2.5（較快，但中文偏大陸腔）"
+      default: 0
+    validations:
+      required: true
