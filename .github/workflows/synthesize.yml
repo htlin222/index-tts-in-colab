@@ -92,7 +92,11 @@ jobs:
 
       - name: Install Colab CLI
         run: |
-          pip install --user google-colab-cli
+          # Pin jupyter-kernel-client below 1.0: the 1.0.0 release (2026-08-08)
+          # renamed KernelClient -> JupyterKernelClient, which breaks
+          # google-colab-cli 0.6.0's internal `jupyter_kernel_client.KernelClient(...)`
+          # call. google-colab-cli itself doesn't pin this transitive dependency.
+          pip install --user 'jupyter-kernel-client<1.0' google-colab-cli
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Write Colab ADC credentials
