@@ -126,7 +126,10 @@ jobs:
       - name: Run synthesis on Colab GPU
         run: |
           SESSION="${{ steps.colab_new.outputs.session }}"
-          colab --auth=adc exec -s "$SESSION" -f colab_job/synthesize.py
+          # colab exec's default --timeout is 30s, meant for short interactive
+          # cells. Our script does a full env build + model download + batch
+          # synth in one call, which legitimately takes 15-20 min.
+          colab --auth=adc exec -s "$SESSION" -f colab_job/synthesize.py --timeout 1800
 
       - name: Download result
         run: |
