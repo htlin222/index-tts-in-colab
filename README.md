@@ -2,12 +2,12 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![synthesize](https://github.com/htlin222/index-tts-in-colab/actions/workflows/synthesize.yml/badge.svg)](https://github.com/htlin222/index-tts-in-colab/actions/workflows/synthesize.yml)
-[![IndexTTS-2](https://img.shields.io/badge/model-IndexTTS--2-blue)](https://github.com/index-tts/index-tts)
+[![IndexTTS-2](https://img.shields.io/badge/model-IndexTTS--2.5-blue)](https://github.com/index-tts/index-tts)
 [![Colab CLI](https://img.shields.io/badge/runtime-Colab%20CLI-orange)](https://github.com/googlecolab/google-colab-cli)
 
-**Open a GitHub issue, get zero-shot voice-cloned speech back as a Release.** This repo wires up a full serverless text-to-speech pipeline entirely on free infrastructure: a GitHub Issue form triggers a GitHub Actions workflow, which provisions a free Google Colab T4 GPU via the official [Colab CLI](https://github.com/googlecolab/google-colab-cli), runs [IndexTTS-2](https://github.com/index-tts/index-tts) zero-shot voice cloning, and publishes the resulting `.wav` as a GitHub Release — no server, no persistent infra, no manual steps. Long text is automatically split into chunks and processed on the same warm Colab session so the ~10-minute environment/model-download cost is paid once per request, not once per chunk. See the [architecture](#架構) and [known limitations](#已知限制--之後可以做的事) sections below (Traditional Chinese) for the full design.
+**Open a GitHub issue, get zero-shot voice-cloned speech back as a Release.** This repo wires up a full serverless text-to-speech pipeline entirely on free infrastructure: a GitHub Issue form triggers a GitHub Actions workflow, which provisions a free Google Colab T4 GPU via the official [Colab CLI](https://github.com/googlecolab/google-colab-cli), runs [IndexTTS-2.5](https://github.com/index-tts/index-tts) zero-shot voice cloning, and publishes the resulting `.wav` as a GitHub Release — no server, no persistent infra, no manual steps. Long text is automatically split into chunks and processed on the same warm Colab session so the ~10-minute environment/model-download cost is paid once per request, not once per chunk. See the [architecture](#架構) and [known limitations](#已知限制--之後可以做的事) sections below (Traditional Chinese) for the full design.
 
-開一個 GitHub Issue → GitHub Action 解析內容 → 呼叫 [Colab CLI](https://github.com/googlecolab/google-colab-cli) 在免費 T4 GPU 上跑 [IndexTTS-2](https://github.com/index-tts/index-tts) zero-shot 聲音克隆 → 把合成好的 `.wav` 發成 GitHub Release，並在 issue 留言連結。
+開一個 GitHub Issue → GitHub Action 解析內容 → 呼叫 [Colab CLI](https://github.com/googlecolab/google-colab-cli) 在免費 T4 GPU 上跑 [IndexTTS-2.5](https://github.com/index-tts/index-tts) zero-shot 聲音克隆 → 把合成好的 `.wav` 發成 GitHub Release，並在 issue 留言連結。
 
 ## 目錄
 
@@ -41,12 +41,12 @@ scripts/parse_issue.py  ─→ batch_chunk_0.jsonl, batch_chunk_1.jsonl, ...
 colab CLI（同一個 Colab session，GitHub Secrets 裡的 ADC 憑證）
   │
   │  colab new -s ci-<run_id> --gpu T4              ← 只跑一次
-  │  colab upload  ref.wav / _common.py / hf_token  ← 只跑一次
+  │  colab upload  ref.wav / _common.py / _synth_inner_25.py / hf_token  ← 只跑一次
   │  colab exec    colab_job/setup.py               ← 只跑一次：clone + uv sync + 下模型
   │
   │  for each chunk:                                ← 重複 N 次
   │    colab upload  chunk_index.txt / batch_chunk_N.jsonl
-  │    colab exec    colab_job/synth_chunk.py        （只跑 indextts2 batch，模型已在硬碟上）
+  │    colab exec    colab_job/synth_chunk.py        （呼叫 _synth_inner_25.py，模型已在硬碟上）
   │
   │  colab exec    colab_job/concat_chunks.py        ← 只跑一次：把 chunk_0..N.wav 接起來
   │  colab download output.wav
@@ -56,6 +56,8 @@ gh release create + gh issue comment/close
 ```
 
 `colab exec -f script.py` 是把腳本內容當程式碼送進遠端 kernel 執行，不是把檔案放到 VM 硬碟上，所以 `setup.py` / `synth_chunk.py` 之間不能直接互相 import——共用的 `run()`（timeout／心跳／重試邏輯）額外用 `colab upload` 放成 `/content/_common.py`，兩支腳本都從那裡 import。
+
+用的是 **IndexTTS-2.5**（`IndexTeam/IndexTTS-2.5`），不是 2.0。官方 `indextts2` CLI 只包了 `infer_v2.py`（2.0），沒有包 `infer_v2_5.py`——`indextts2 download`/`indextts2 batch` 都是寫死抓 2.0。所以 `setup.py` 自己呼叫 index-tts 內部的 `snapshot_download`/`ensure_models_available` 抓 2.5 權重，`synth_chunk.py` 也不走 `indextts2 batch`，改成呼叫另外上傳的 `_synth_inner_25.py`（在 uv venv 內直接 `import indextts.infer_v2_5.IndexTTS2`，逐行呼叫 `.infer()`）。順便省了 2.0 版必抓、但我們用不到的 QwenEmotion 模型（~1.2GB，只有 `emo_text` 模式才需要，我們一直只用 `emo_vector`）。
 
 ## 已知限制 / 之後可以做的事
 
@@ -99,4 +101,4 @@ gh secret set HF_TOKEN --repo htlin222/index-tts-in-colab
 
 ## License
 
-這個 repo 自己的程式碼（workflow / issue 表單 / `scripts/`、`colab_job/` 底下的腳本）採用 [MIT License](LICENSE)。它在 runtime clone 的 [index-tts](https://github.com/index-tts/index-tts) 原始碼和從 [HuggingFace 下載的 IndexTTS-2 模型權重](https://huggingface.co/IndexTeam/IndexTTS-2)各自有自己的授權（Bilibili 自訂授權，不是 MIT），不在這個 MIT 範圍內。
+這個 repo 自己的程式碼（workflow / issue 表單 / `scripts/`、`colab_job/` 底下的腳本）採用 [MIT License](LICENSE)。它在 runtime clone 的 [index-tts](https://github.com/index-tts/index-tts) 原始碼和從 [HuggingFace 下載的 IndexTTS-2.5 模型權重](https://huggingface.co/IndexTeam/IndexTTS-2.5)各自有自己的授權（Bilibili 自訂授權，不是 MIT），不在這個 MIT 範圍內。

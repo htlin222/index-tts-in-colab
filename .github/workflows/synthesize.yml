@@ -147,6 +147,7 @@ jobs:
           SESSION="${{ steps.colab_new.outputs.session }}"
           colab --auth=adc upload -s "$SESSION" assets/ref_voice.wav /content/ref.wav
           colab --auth=adc upload -s "$SESSION" colab_job/_common.py /content/_common.py
+          colab --auth=adc upload -s "$SESSION" colab_job/_synth_inner_25.py /content/_synth_inner_25.py
           if [ -f hf_token.txt ]; then
             colab --auth=adc upload -s "$SESSION" hf_token.txt /content/hf_token
           fi

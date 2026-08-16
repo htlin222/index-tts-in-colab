@@ -1,25 +1,28 @@
 """Runs once PER CHUNK via `colab exec -f colab_job/synth_chunk.py`, reusing
 the session colab_job/setup.py already warmed up (env built, models on
-disk). Each call is a fresh `indextts2` subprocess, so it re-pays loading
-the model into GPU memory (~131s measured), but not the env build or
+disk). Each call is a fresh `uv run python _synth_inner_25.py` subprocess,
+so it re-pays loading the model into GPU memory, but not the env build or
 model download.
 
 Expects, uploaded fresh before each call:
-  /content/_common.py         -- shared run() + concat_wavs_with_fade() helpers
-  /content/chunk_index.txt    -- which chunk this call should process, e.g. "2"
-  /content/batch_chunk_N.jsonl -- that chunk's indextts2 batch tasks
-  /content/ref.wav            -- reference voice clip (uploaded once, reused)
+  /content/_common.py          -- shared run() + concat_wavs_with_fade() helpers
+  /content/_synth_inner_25.py  -- the actual IndexTTS-2.5 call (no official
+                                   CLI wraps infer_v2_5.py, so we invoke it
+                                   ourselves inside the uv venv)
+  /content/chunk_index.txt     -- which chunk this call should process, e.g. "2"
+  /content/batch_chunk_N.jsonl -- that chunk's tasks (text/voice/emotion_vector/
+                                   emotion_weight/silence_after_ms)
+  /content/ref.wav             -- reference voice clip (uploaded once, reused)
 
 Produces:
   /content/chunk_N.wav
 
-Synthesizes each line to its own file (indextts2 batch's --output-dir mode,
-not --concat) and stitches them ourselves via concat_wavs_with_fade -- see
-that function's docstring for why: indextts2's own --concat writes raw
-digital silence butted directly against full-amplitude audio, which reads
-as an abrupt "click" at every line boundary (2026-08-16 user feedback: the
-cut points sounded wrong). A short fade envelope on each segment fixes
-that without changing the pause durations parse_issue.py already computed.
+Synthesizes each line to its own file, then stitches them ourselves via
+concat_wavs_with_fade -- see that function's docstring for why: raw digital
+silence butted directly against full-amplitude audio reads as an abrupt
+"click" at every line boundary (2026-08-16 user feedback: the cut points
+sounded wrong). A short fade envelope on each segment fixes that without
+changing the pause durations parse_issue.py already computed.
 """
 import json
 import sys
@@ -30,9 +33,10 @@ from _common import run, concat_wavs_with_fade  # noqa: E402
 
 WORK = Path("/content")
 REPO = WORK / "index-tts"
-MODEL_DIR = REPO / "checkpoints_2"
+MODEL_DIR = REPO / "checkpoints_25"
 CHUNK_INDEX_FILE = WORK / "chunk_index.txt"
 VOICE_FILE = WORK / "ref.wav"
+INNER_SCRIPT = WORK / "_synth_inner_25.py"
 SEG_PREFIX = "seg"
 
 
@@ -48,6 +52,7 @@ def load_tasks(batch_file):
 
 def main():
     assert VOICE_FILE.is_file(), f"missing {VOICE_FILE}"
+    assert INNER_SCRIPT.is_file(), f"missing {INNER_SCRIPT}"
     assert CHUNK_INDEX_FILE.is_file(), f"missing {CHUNK_INDEX_FILE}"
     idx = CHUNK_INDEX_FILE.read_text().strip()
 
@@ -57,31 +62,18 @@ def main():
 
     tasks = load_tasks(batch_file)
     total_chars = sum(len(t.get("text", "")) for t in tasks)
-    # Regressed from two real runs (36 chars->173s, 93 chars->240s on T4):
-    # batch_time ≈ 131s fixed (model load) + 1.18s/char. ~2x safety margin
-    # over the measured slope/intercept since it's only two data points.
-    # scripts/parse_issue.py caps each chunk at CHUNK_MAX_CHARS=700 chars.
+    # Regressed from IndexTTS-2 real runs (36 chars->173s, 93 chars->240s on
+    # T4): batch_time ≈ 131s fixed (model load) + 1.18s/char, ~2x safety
+    # margin. IndexTTS-2.5 is claimed faster, not slower, so this generous
+    # a ceiling should still hold -- will recalibrate from real 2.5 numbers
+    # once we have them. scripts/parse_issue.py caps each chunk at
+    # CHUNK_MAX_CHARS=700 chars.
     batch_timeout = 260 + 2 * total_chars
-
-    # indextts2's batch-file validator rejects `silence_after_ms` outright
-    # unless --concat is passed ("field 'silence_after_ms' is only valid
-    # with --concat") -- confirmed the hard way on 2026-08-16. We're not
-    # using --concat (we stitch ourselves below), so pass indextts2 a
-    # filtered copy without that field; we still have the real values in
-    # `tasks` for concat_wavs_with_fade.
-    row_batch_file = WORK / f"batch_chunk_{idx}_row.jsonl"
-    with open(row_batch_file, "w", encoding="utf-8") as f:
-        for t in tasks:
-            f.write(json.dumps({k: v for k, v in t.items() if k != "silence_after_ms"},
-                                ensure_ascii=False) + "\n")
 
     seg_dir = WORK / f"segs_{idx}"
     seg_dir.mkdir(exist_ok=True)
-    run(["uv", "run", "indextts2", "batch",
-         "--batch-file", str(row_batch_file),
-         "--model-dir", str(MODEL_DIR),
-         "--output-dir", str(seg_dir), "--output-prefix", SEG_PREFIX,
-         "--no-cuda-kernel", "--force", "--verbose"],
+    run(["uv", "run", "python", str(INNER_SCRIPT),
+         str(batch_file), str(seg_dir), str(MODEL_DIR), SEG_PREFIX],
         cwd=str(REPO), timeout=batch_timeout)
 
     segments = []
