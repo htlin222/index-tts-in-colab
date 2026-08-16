@@ -115,7 +115,19 @@ jobs:
         run: |
           SESSION="ci-${{ github.run_id }}"
           echo "session=$SESSION" >> "$GITHUB_OUTPUT"
-          colab --auth=adc new -s "$SESSION" --gpu T4
+          # Free-tier accounts allow only one GPU runtime at a time, so a
+          # stray interactive Colab tab (or overlapping CI run) can trip
+          # TooManyAssignmentsError transiently. Retry a few times before
+          # giving up and needing a human to re-trigger.
+          for attempt in 1 2 3; do
+            if colab --auth=adc new -s "$SESSION" --gpu T4; then
+              exit 0
+            fi
+            echo "::warning::colab new attempt $attempt failed (likely GPU contention); retrying in 60s..."
+            sleep 60
+          done
+          echo "::error::colab new failed after 3 attempts"
+          exit 1
 
       - name: Write HuggingFace token (optional, improves download stability)
         env:

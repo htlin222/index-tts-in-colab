@@ -36,36 +36,53 @@ HEARTBEAT_SECONDS = 60
 STALL_HEARTBEATS_BEFORE_WARNING = 5  # 5 min of zero new output -> call it out
 
 
-def run(cmd, cwd=None, timeout=600):
-    print(f"\n>>> {' '.join(cmd)}  (timeout={timeout}s)", flush=True)
-    start = time.monotonic()
-    stall_count = 0
-    last_size = -1
-    with open(STEP_LOG, "wb") as logf:
-        proc = subprocess.Popen(cmd, cwd=cwd, stdout=logf, stderr=subprocess.STDOUT)
-        while proc.poll() is None:
-            elapsed = time.monotonic() - start
-            if elapsed > timeout:
-                proc.kill()
-                proc.wait()
-                _print_tail()
-                raise RuntimeError(
-                    f"command exceeded {timeout}s timeout after {elapsed:.0f}s: {' '.join(cmd)}"
-                )
-            time.sleep(HEARTBEAT_SECONDS)
-            size = STEP_LOG.stat().st_size
-            grew = size != last_size
-            stall_count = 0 if grew else stall_count + 1
-            note = "" if grew else f"  [no new output for {stall_count * HEARTBEAT_SECONDS}s]"
-            print(f"    ... still running ({elapsed:.0f}s elapsed, {size} bytes so far){note}", flush=True)
-            if stall_count >= STALL_HEARTBEATS_BEFORE_WARNING:
-                print(f"    ⚠ possible stall: no output growth for "
-                      f"{stall_count * HEARTBEAT_SECONDS}s (will still respect the {timeout}s timeout)", flush=True)
-            last_size = size
+def run(cmd, cwd=None, timeout=600, retries=0, retry_backoff=30):
+    """Run cmd with a heartbeat + hard timeout. On failure (timeout or non-zero
+    exit), retry up to `retries` more times with a fixed backoff. Safe to
+    retry for the HF download step specifically: huggingface_hub resumes
+    partially-downloaded blobs from its local cache instead of restarting.
+    """
+    attempt = 0
+    while True:
+        attempt += 1
+        label = f"  (attempt {attempt}/{retries + 1})" if retries else ""
+        print(f"\n>>> {' '.join(cmd)}  (timeout={timeout}s){label}", flush=True)
+        start = time.monotonic()
+        stall_count = 0
+        last_size = -1
+        with open(STEP_LOG, "wb") as logf:
+            proc = subprocess.Popen(cmd, cwd=cwd, stdout=logf, stderr=subprocess.STDOUT)
+            timed_out = False
+            while proc.poll() is None:
+                elapsed = time.monotonic() - start
+                if elapsed > timeout:
+                    proc.kill()
+                    proc.wait()
+                    timed_out = True
+                    break
+                time.sleep(HEARTBEAT_SECONDS)
+                size = STEP_LOG.stat().st_size
+                grew = size != last_size
+                stall_count = 0 if grew else stall_count + 1
+                note = "" if grew else f"  [no new output for {stall_count * HEARTBEAT_SECONDS}s]"
+                print(f"    ... still running ({elapsed:.0f}s elapsed, {size} bytes so far){note}", flush=True)
+                if stall_count >= STALL_HEARTBEATS_BEFORE_WARNING:
+                    print(f"    ⚠ possible stall: no output growth for "
+                          f"{stall_count * HEARTBEAT_SECONDS}s (will still respect the {timeout}s timeout)", flush=True)
+                last_size = size
 
-    _print_tail()
-    if proc.returncode != 0:
-        raise RuntimeError(f"command failed ({proc.returncode}): {' '.join(cmd)}")
+        _print_tail()
+        if timed_out:
+            err = RuntimeError(f"command exceeded {timeout}s timeout: {' '.join(cmd)}")
+        elif proc.returncode != 0:
+            err = RuntimeError(f"command failed ({proc.returncode}): {' '.join(cmd)}")
+        else:
+            return  # success
+
+        if attempt > retries:
+            raise err
+        print(f"    retrying in {retry_backoff}s after: {err}", flush=True)
+        time.sleep(retry_backoff)
 
 
 def _print_tail(max_bytes=20000):
@@ -106,7 +123,7 @@ def main():
 
     run(["uv", "sync"], cwd=str(REPO), timeout=600)
     run(["uv", "run", "indextts2", "download", "--model-dir", str(MODEL_DIR)],
-        cwd=str(REPO), timeout=1200)
+        cwd=str(REPO), timeout=1200, retries=2, retry_backoff=30)
     run(["uv", "run", "indextts2", "check", "--model-dir", str(MODEL_DIR),
          "--device", "cuda"], cwd=str(REPO), timeout=90)
 
