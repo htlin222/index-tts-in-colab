@@ -207,11 +207,34 @@ jobs:
           SESSION="${{ steps.colab_new.outputs.session }}"
           N=$(cat chunk_count.txt)
           echo "synthesizing $N chunk(s)"
+
+          # 2026-08-17 real failure: a 9-chunk run (~55min in) died on the
+          # LAST chunk's upload with "File or directory not found:
+          # /content/...". Traced into colab_cli/contents.py: that message
+          # is what it raises on an HTTP 404 from the Colab backend's
+          # Contents API -- i.e. the session/kernel had gone away, not a
+          # missing local file. A single transient hiccup this late costs
+          # the entire run's already-completed work (the VM is stateful
+          # but ephemeral -- nothing survives to resume from). Retry
+          # uploads a few times before giving up.
+          upload_with_retry () {
+            local local_path="$1" remote_path="$2" attempt
+            for attempt in 1 2 3; do
+              if colab --auth=adc upload -s "$SESSION" "$local_path" "$remote_path"; then
+                return 0
+              fi
+              echo "::warning::upload of $local_path attempt $attempt failed; retrying in 20s..."
+              sleep 20
+            done
+            echo "::error::upload of $local_path failed after 3 attempts -- session likely died"
+            return 1
+          }
+
           for i in $(seq 0 $((N - 1))); do
             echo "=== chunk $i/$((N - 1)) ==="
             echo -n "$i" > chunk_index.txt
-            colab --auth=adc upload -s "$SESSION" chunk_index.txt /content/chunk_index.txt
-            colab --auth=adc upload -s "$SESSION" "batch_chunk_$i.jsonl" "/content/batch_chunk_$i.jsonl"
+            upload_with_retry chunk_index.txt /content/chunk_index.txt
+            upload_with_retry "batch_chunk_$i.jsonl" "/content/batch_chunk_$i.jsonl"
             # Each call only pays model-load + that chunk's synth time (env
             # and model weights are already on disk from the setup step).
             # 1800s covers CHUNK_MAX_CHARS=700 with margin; see
@@ -230,7 +253,15 @@ jobs:
         run: |
           set -o pipefail
           SESSION="${{ steps.colab_new.outputs.session }}"
-          colab --auth=adc upload -s "$SESSION" chunk_count.txt /content/chunk_count.txt
+          # Same rationale as the retry wrapper in the chunk loop above --
+          # this runs after all chunks are done, so a transient upload
+          # failure here would waste that entire completed run too.
+          for attempt in 1 2 3; do
+            colab --auth=adc upload -s "$SESSION" chunk_count.txt /content/chunk_count.txt && break
+            echo "::warning::chunk_count.txt upload attempt $attempt failed; retrying in 20s..."
+            sleep 20
+            [ "$attempt" = 3 ] && { echo "::error::chunk_count.txt upload failed after 3 attempts"; exit 1; }
+          done
           colab --auth=adc exec -s "$SESSION" -f colab_job/concat_chunks.py --timeout 120 \
             2>&1 | tee /tmp/exec_concat.log
           if grep -q '^FATAL:' /tmp/exec_concat.log; then
