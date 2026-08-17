@@ -36,9 +36,14 @@ import sys
 # colab-exec call's synthesis time predictable and comfortably inside its
 # own timeout; MAX_TOTAL_CHARS bounds how many chunks (and therefore how
 # much total wall-clock and Colab compute quota) a single issue can cost.
-# See README for the full breakdown.
-MAX_LINES = 150
-MAX_TOTAL_CHARS = 3000
+# Raised 3000->6000 after a real long-form test (podcast-script-length
+# text, 5645 chars / 142 lines / 9 chunks) -- realistic content like a
+# script or article legitimately runs this long, not just short poems.
+# At 6000 chars the realistic worst case is ~9-10 chunks, ~150min of
+# synthesis alone; the workflow's job timeout-minutes was raised to 240
+# to match. See README for the full breakdown.
+MAX_LINES = 200
+MAX_TOTAL_CHARS = 6000
 CHUNK_MAX_CHARS = 700
 MAX_LINE_CHARS = 200  # a single absurdly long line would blow a chunk's budget alone
 VOICE_PATH = "/content/ref.wav"

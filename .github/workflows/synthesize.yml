@@ -62,7 +62,10 @@ jobs:
     # A long request can span many chunks (see scripts/parse_issue.py);
     # each colab-exec call is individually bounded, but the sum across a
     # worst-case chunk count needs headroom. See README for the math.
-    timeout-minutes: 150
+    # 2026-08-16 real test: 5645 chars / 9 chunks estimated ~131 min of
+    # synthesis alone (9*131s fixed + 5645*1.18s), pushing total realistic
+    # time close to the previous 150min ceiling with no margin left.
+    timeout-minutes: 240
     steps:
       - name: Checkout
         uses: actions/checkout@v4
