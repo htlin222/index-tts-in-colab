@@ -38,9 +38,16 @@ on:
 
 # Colab's free tier allows only one GPU runtime at a time on this account,
 # so serialize all synthesis runs instead of letting them race each other.
+# Without `queue: max`, a concurrency group only holds one running + one
+# pending run -- a third request silently cancels the second one (no
+# failure, so nothing downstream ever notices) before it ever starts.
+# `queue: max` makes it a real FIFO queue (up to 100 waiting), so a
+# request only gets dropped in the practically-impossible case of >100
+# requests queued at once.
 concurrency:
   group: colab-gpu-synthesis
   cancel-in-progress: false
+  queue: max
 
 permissions:
   contents: write
@@ -271,4 +278,17 @@ jobs:
           gh issue comment ${{ github.event.issue.number }} --body \
             "❌ 合成失敗，詳細記錄： ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
 
-          常見原因：Colab 免費帳號同時只能有一個 GPU runtime；如果有人正在用瀏覽器開著另一個 Colab notebook 占用 T4，這裡就會失敗。關掉那個分頁再重開一次 issue，或編輯這則 issue 觸發重試。"
+          常見原因：Colab 免費帳號同時只能有一個 GPU runtime；如果有人正在用瀏覽器開著另一個 Colab notebook 占用 T4，這裡就會失敗。關掉那個分頁後，開一個新的 issue 重試（workflow 只在 issue **開啟**時觸發，編輯這則 issue 不會重新跑）。"
+
+      # GitHub Actions' concurrency group only holds the running run plus one
+      # queued run -- if a third request comes in while this one is queued,
+      # this run gets silently cancelled (not "failed", so `if: failure()`
+      # above never fires) to make room for the newer one. Without this
+      # step the issue just sits open forever with zero explanation.
+      - name: Comment cancellation on issue
+        if: cancelled() && github.event_name == 'issues'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh issue comment ${{ github.event.issue.number }} --body \
+            "⏸️ 這個請求被取消了。Workflow 現在用 \`queue: max\` 讓最多 100 個請求真的排隊等待，所以會走到這一步通常是排隊人數真的超過 100、或有人手動取消了這個 run——不是單純被下一個請求擠掉。開一個新的 issue 重新送出即可。"
